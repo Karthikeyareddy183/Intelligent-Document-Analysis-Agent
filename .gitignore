@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment variables
+.env
+
+# Data directories
+data/uploads/*
+data/processed/*
+data/chroma_db/*
+!data/uploads/.gitkeep
+!data/processed/.gitkeep
+!data/chroma_db/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checking
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Docker
+docker/volumes/
+
+# Test files
+test_document.pdf
+
+# Model cache
+models/
+*.bin
+*.onnx
