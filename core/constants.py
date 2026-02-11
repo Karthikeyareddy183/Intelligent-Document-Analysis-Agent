@@ -23,6 +23,7 @@ class LLMProvider(str, Enum):
 class VectorDBType(str, Enum):
     CHROMADB = "chromadb"
     PINECONE = "pinecone"
+    SUPABASE = "supabase"
 
 
 # Supported file types for upload

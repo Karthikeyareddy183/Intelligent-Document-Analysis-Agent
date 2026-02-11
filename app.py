@@ -214,11 +214,12 @@ with tab_about:
 
     - **CrewAI** for multi-agent orchestration
     - **LangChain** for RAG pipeline management
-    - **HuggingFace** sentence-transformers for embeddings
-    - **ChromaDB** for vector storage and semantic search
+    - **HuggingFace** sentence-transformers for embeddings (all-MiniLM-L6-v2, 384-dim)
+    - **Supabase pgvector** for vector storage, semantic search & hybrid search
     - **OpenCV** for computer vision (table/chart detection)
-    - **GPT-4o / Claude** for multi-modal document analysis
+    - **OpenRouter** LLM gateway (Gemini, GPT-4o, Claude, etc.)
     - **FastAPI** for the backend REST API
+    - **Supabase Storage** for uploaded file persistence
 
     ### Agents
     | Agent | Role |

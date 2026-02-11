@@ -1,6 +1,7 @@
 """Upload endpoint — handles document file uploads."""
 
 import time
+import threading
 from fastapi import APIRouter, UploadFile, File, HTTPException, Request, BackgroundTasks
 
 from api.schemas.responses import UploadResponse, ErrorResponse
@@ -10,6 +11,18 @@ from core.logger import setup_logger
 logger = setup_logger(__name__)
 
 router = APIRouter()
+
+
+def _process_in_thread(orchestrator, file_path: str, document_id: str, filename: str):
+    """Run document processing in a separate thread so it doesn't block the event loop."""
+    try:
+        orchestrator.process_document(
+            file_path=file_path,
+            document_id=document_id,
+            filename=filename,
+        )
+    except Exception as e:
+        logger.error("Background processing failed", extra={"document_id": document_id, "error": str(e)})
 
 
 @router.post(
@@ -53,14 +66,14 @@ async def upload_document(
     doc_service = services["document_service"]
     document_id, file_path = doc_service.save_upload(contents, file.filename)
 
-    # Process document in background
+    # Process document in a separate thread (not BackgroundTasks which blocks the event loop)
     orchestrator = services["orchestrator"]
-    background_tasks.add_task(
-        orchestrator.process_document,
-        file_path=file_path,
-        document_id=document_id,
-        filename=file.filename,
+    thread = threading.Thread(
+        target=_process_in_thread,
+        args=(orchestrator, file_path, document_id, file.filename),
+        daemon=True,
     )
+    thread.start()
 
     logger.info(
         "Upload accepted",

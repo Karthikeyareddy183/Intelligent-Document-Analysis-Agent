@@ -24,8 +24,8 @@ class DocumentService:
     """Orchestrates document upload, storage, and content extraction."""
 
     def __init__(self, config: Settings):
-        self.upload_dir = Path(config.CHROMA_PERSIST_DIR).parent / "uploads"
-        self.processed_dir = Path(config.CHROMA_PERSIST_DIR).parent / "processed"
+        self.upload_dir = Path(config.DATA_DIR) / "uploads"
+        self.processed_dir = Path(config.DATA_DIR) / "processed"
         self.ocr_language = config.OCR_LANGUAGE
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.processed_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +179,63 @@ class DocumentService:
 
         logger.info("Table detection complete", extra={"tables_found": len(tables)})
         return tables
+
+    def extract_page_images(self, file_path: str) -> dict[int, list[bytes]]:
+        """Extract images from each PDF page as PNG bytes.
+
+        Returns a dict mapping page_number (1-based) to a list of image bytes.
+        Only extracts images large enough to be meaningful (diagrams, charts, figures).
+        """
+        page_images: dict[int, list[bytes]] = {}
+
+        try:
+            from PyPDF2 import PdfReader
+            import io
+
+            reader = PdfReader(file_path)
+            for page_idx, page in enumerate(reader.pages):
+                page_num = page_idx + 1
+                images_on_page = []
+
+                if "/XObject" not in (page.get("/Resources") or {}):
+                    continue
+
+                x_objects = page["/Resources"]["/XObject"].get_object()
+                for obj_name in x_objects:
+                    obj = x_objects[obj_name].get_object()
+                    if obj.get("/Subtype") == "/Image":
+                        width = obj.get("/Width", 0)
+                        height = obj.get("/Height", 0)
+
+                        # Skip tiny images (icons, bullets, logos < 100x100)
+                        if width < 100 or height < 100:
+                            continue
+
+                        try:
+                            data = obj.get_data()
+                            # Convert raw image data to PNG via PIL
+                            img = Image.open(io.BytesIO(data))
+                            buf = io.BytesIO()
+                            img.save(buf, format="PNG")
+                            images_on_page.append(buf.getvalue())
+                        except Exception:
+                            # Some image formats can't be decoded — skip silently
+                            continue
+
+                if images_on_page:
+                    page_images[page_num] = images_on_page
+
+            logger.info(
+                "PDF images extracted",
+                extra={
+                    "pages_with_images": len(page_images),
+                    "total_images": sum(len(v) for v in page_images.values()),
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Image extraction failed (non-fatal): {e}")
+
+        return page_images
 
     def _preprocess_for_ocr(self, image: np.ndarray) -> np.ndarray:
         """Preprocess image for better OCR accuracy."""

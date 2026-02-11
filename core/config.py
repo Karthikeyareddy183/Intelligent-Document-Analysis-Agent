@@ -22,15 +22,24 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSION: int = 384
 
     # ─── Vector Database ──────────────────────────
-    VECTOR_DB_TYPE: str = Field(default="chromadb", description="chromadb | pinecone")
+    VECTOR_DB_TYPE: str = Field(default="supabase", description="chromadb | pinecone | supabase")
     CHROMA_PERSIST_DIR: str = "./data/chroma_db"
     CHROMA_COLLECTION_NAME: str = "documents"
     PINECONE_API_KEY: str = ""
     PINECONE_ENVIRONMENT: str = ""
     PINECONE_INDEX_NAME: str = "doc-analysis"
 
+    # ─── Supabase ────────────────────────────────
+    SUPABASE_URL: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+    SUPABASE_TABLE_NAME: str = "document_chunks"
+    SUPABASE_BUCKET_NAME: str = "documents"
+
+    # ─── Data Directory ──────────────────────────
+    DATA_DIR: str = "./data"
+
     # ─── Document Processing ─────────────────────
-    MAX_FILE_SIZE_MB: int = 50
+    MAX_FILE_SIZE_MB: int = 250
     CHUNK_SIZE: int = 750
     CHUNK_OVERLAP: int = 150
     OCR_LANGUAGE: str = "eng"
