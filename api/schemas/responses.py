@@ -64,6 +64,46 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 
+class MessageResponse(BaseModel):
+    """A single chat message."""
+
+    id: str
+    role: str
+    content: str
+    sources: Optional[list] = None
+    created_at: str
+
+
+class ConversationResponse(BaseModel):
+    """A conversation with its messages."""
+
+    id: str
+    user_id: str
+    document_id: str
+    title: str
+    messages: list[MessageResponse] = []
+    created_at: str
+    updated_at: str
+
+
+class ConversationListItem(BaseModel):
+    """A conversation summary for list views."""
+
+    id: str
+    document_id: str
+    title: str
+    preview: str = ""
+    created_at: str
+    updated_at: str
+
+
+class ConversationListResponse(BaseModel):
+    """Response for listing conversations."""
+
+    conversations: list[ConversationListItem]
+    total: int
+
+
 class ErrorResponse(BaseModel):
     """Standard error response."""
 

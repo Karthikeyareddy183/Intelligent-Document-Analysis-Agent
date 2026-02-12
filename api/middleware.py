@@ -14,6 +14,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Log every request with timing and request ID."""
 
     async def dispatch(self, request: Request, call_next):
+        # Let CORS preflight pass through without interference
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         request_id = str(uuid.uuid4())[:8]
         start = time.time()
 

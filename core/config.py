@@ -14,12 +14,17 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
-    LLM_PROVIDER: str = Field(default="openrouter", description="openai | anthropic | openrouter")
-    LLM_MODEL: str = Field(default="google/gemini-2.0-flash-001", description="Model identifier")
+    LLM_PROVIDER: str = Field(default="openai", description="openai | anthropic | openrouter")
+    LLM_MODEL: str = Field(default="gpt-4o-mini", description="Model identifier")
 
     # ─── Embeddings ───────────────────────────────
+    EMBEDDING_PROVIDER: str = Field(default="openai", description="openai | local")
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    EMBEDDING_DIMENSION: int = 384
+    EMBEDDING_DIMENSION: int = 1536
+
+    # ─── Image Processing ─────────────────────────
+    SKIP_IMAGE_VISION: bool = True
 
     # ─── Vector Database ──────────────────────────
     VECTOR_DB_TYPE: str = Field(default="supabase", description="chromadb | pinecone | supabase")
@@ -32,6 +37,8 @@ class Settings(BaseSettings):
     # ─── Supabase ────────────────────────────────
     SUPABASE_URL: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""
+    SUPABASE_JWT_SECRET: str = ""
+    SUPABASE_ANON_KEY: str = ""
     SUPABASE_TABLE_NAME: str = "document_chunks"
     SUPABASE_BUCKET_NAME: str = "documents"
 

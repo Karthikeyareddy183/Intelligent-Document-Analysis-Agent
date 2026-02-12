@@ -39,3 +39,39 @@ class QueryRequest(BaseModel):
             ]
         }
     }
+
+
+class ChatMessage(BaseModel):
+    """A single chat message for conversation history."""
+
+    role: str = Field(..., description="Message role: 'user' or 'assistant'")
+    content: str = Field(..., description="Message content")
+
+
+class StreamQueryRequest(BaseModel):
+    """Request body for streaming document query with chat history."""
+
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="Natural language question about document content",
+    )
+    document_id: Optional[str] = Field(
+        default=None,
+        description="Filter to a specific document (UUID). Searches all if not provided.",
+    )
+    top_k: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Number of relevant chunks to retrieve",
+    )
+    chat_history: list[ChatMessage] = Field(
+        default=[],
+        description="Previous chat messages for multi-turn conversation",
+    )
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="Conversation ID to auto-save messages to",
+    )

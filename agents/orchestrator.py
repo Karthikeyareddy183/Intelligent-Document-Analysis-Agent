@@ -1,8 +1,10 @@
 """CrewAI orchestrator — assembles agents, tasks, and crews."""
 
+import json
 import re
 import time
 import uuid
+from collections.abc import AsyncIterator
 from typing import Optional
 
 from crewai import Agent, Task, Crew, Process
@@ -79,12 +81,12 @@ class DocumentAnalysisCrew:
     # ─── Document Processing Pipeline ────────────────────────
 
     def process_document(
-        self, file_path: str, document_id: str, filename: str
+        self, file_path: str, document_id: str, filename: str, user_id: Optional[str] = None
     ) -> dict:
         """Run the document processing + indexing pipeline.
 
         1. Extract text, tables from each page
-        2. Extract images and describe them via vision LLM
+        2. Optionally extract images and describe them via vision LLM
         3. Chunk all content with page-level metadata
         4. Generate embeddings and store in vector DB
         """
@@ -110,9 +112,9 @@ class DocumentAnalysisCrew:
 
             total_pages = len(pages)
 
-            # Step 2: Extract images from PDF (non-blocking — skips if fails)
+            # Step 2: Extract images from PDF (skip vision if configured)
             page_images: dict[int, list[bytes]] = {}
-            if is_pdf:
+            if is_pdf and not self.config.SKIP_IMAGE_VISION:
                 page_images = doc_service.extract_page_images(file_path)
 
             # Step 3: Build all chunks (text + tables + image descriptions)
@@ -150,7 +152,7 @@ class DocumentAnalysisCrew:
                             },
                         })
 
-                # 3c. Describe images via vision LLM and add as chunks
+                # 3c. Describe images via vision LLM (only when SKIP_IMAGE_VISION=False)
                 if page_num in page_images:
                     for img_idx, img_bytes in enumerate(page_images[page_num]):
                         description = self._describe_image(llm_service, img_bytes, page_num, img_idx + 1)
@@ -177,26 +179,54 @@ class DocumentAnalysisCrew:
                     "error": "No content extracted from document",
                 }
 
-            # Step 4: Generate embeddings in batches
-            texts = [chunk["text"] for chunk in all_chunks]
-            embeddings = embedding_svc.generate_embeddings(texts)
+            # Step 4+5: Embed and store in batches of 50 chunks
+            # This avoids OpenAI token limits and Supabase payload limits
+            # for large documents (books with 500-1000+ chunks).
+            BATCH_SIZE = 50
+            total_chunks = len(all_chunks)
+            chunks_indexed = 0
 
-            # Step 5: Store in vector DB
-            documents = []
-            for i, (chunk, embedding) in enumerate(zip(all_chunks, embeddings)):
-                documents.append({
-                    "id": f"{document_id}_chunk_{i}",
-                    "embedding": embedding,
-                    "text": chunk["text"],
-                    "document_id": document_id,
-                    "filename": filename,
-                    "page_number": chunk["metadata"].get("page_number", 0),
-                    "section_title": chunk["metadata"].get("section_title", ""),
-                    "chunk_index": i,
-                    "content_type": chunk["metadata"].get("content_type", "text"),
-                })
+            for batch_start in range(0, total_chunks, BATCH_SIZE):
+                batch_end = min(batch_start + BATCH_SIZE, total_chunks)
+                batch_chunks = all_chunks[batch_start:batch_end]
 
-            chunks_indexed = vector_db.add_documents(documents)
+                # 4a. Embed this batch
+                batch_texts = [chunk["text"] for chunk in batch_chunks]
+                batch_embeddings = embedding_svc.generate_embeddings(batch_texts)
+
+                # 4b. Build documents for this batch
+                batch_documents = []
+                for i, (chunk, embedding) in enumerate(zip(batch_chunks, batch_embeddings)):
+                    global_idx = batch_start + i
+                    doc_entry = {
+                        "id": f"{document_id}_chunk_{global_idx}",
+                        "embedding": embedding,
+                        "text": chunk["text"],
+                        "document_id": document_id,
+                        "filename": filename,
+                        "page_number": chunk["metadata"].get("page_number", 0),
+                        "section_title": chunk["metadata"].get("section_title", ""),
+                        "chunk_index": global_idx,
+                        "content_type": chunk["metadata"].get("content_type", "text"),
+                    }
+                    if user_id:
+                        doc_entry["user_id"] = user_id
+                    batch_documents.append(doc_entry)
+
+                # 4c. Store this batch in vector DB
+                batch_indexed = vector_db.add_documents(batch_documents)
+                chunks_indexed += batch_indexed
+
+                logger.info(
+                    "Batch indexed",
+                    extra={
+                        "document_id": document_id,
+                        "batch": batch_start // BATCH_SIZE + 1,
+                        "batch_chunks": len(batch_chunks),
+                        "total_indexed": chunks_indexed,
+                        "total_chunks": total_chunks,
+                    },
+                )
 
             # Update document status
             doc_service.update_document_status(
@@ -215,6 +245,7 @@ class DocumentAnalysisCrew:
                     "pages": total_pages,
                     "chunks": chunks_indexed,
                     "images_described": image_count,
+                    "skip_image_vision": self.config.SKIP_IMAGE_VISION,
                     "elapsed_s": elapsed,
                 },
             )
@@ -247,14 +278,13 @@ class DocumentAnalysisCrew:
     # ─── Query Pipeline ──────────────────────────────────────
 
     def answer_query(
-        self, query: str, document_id: Optional[str] = None, top_k: int = 5
+        self, query: str, document_id: Optional[str] = None, top_k: int = 5, user_id: Optional[str] = None
     ) -> dict:
-        """Run the query answering pipeline with page-aware routing and reranking.
+        """Run the query answering pipeline (non-streaming).
 
         1. Parse page numbers from query for targeted retrieval
         2. Semantic search (with page filter if detected)
-        3. Rerank results with cross-encoder (if available)
-        4. Generate answer with LLM
+        3. Generate answer with LLM
         """
         logger.info(
             "Starting query pipeline",
@@ -272,33 +302,31 @@ class DocumentAnalysisCrew:
             filters = {}
             if document_id:
                 filters["document_id"] = document_id
+            if user_id:
+                filters["user_id"] = user_id
 
-            # Step 2: Search — if user mentions specific pages, do page-filtered + broader search
+            # Step 2: Search
             query_embedding = embedding_svc.generate_query_embedding(query)
 
             if target_pages:
-                # First: get chunks from the specific pages
                 page_results = []
                 for page_num in target_pages:
                     page_filter = {**filters, "page_number": page_num}
                     page_hits = vector_db.search(query_embedding, top_k=10, filters=page_filter)
                     page_results.extend(page_hits)
 
-                # Also do a broader search for surrounding context
                 broad_results = vector_db.search(query_embedding, top_k=top_k, filters=filters if filters else None)
 
-                # Merge: prioritize page-specific results, then add broader ones
                 seen_ids = {r["id"] for r in page_results}
                 for r in broad_results:
                     if r["id"] not in seen_ids:
                         page_results.append(r)
                         seen_ids.add(r["id"])
 
-                search_results = page_results[:top_k + 5]  # Allow extra for reranking
+                search_results = page_results[:top_k]
             else:
-                # No page mentioned — standard semantic search with more candidates for reranking
                 search_results = vector_db.search(
-                    query_embedding, top_k=top_k * 2, filters=filters if filters else None
+                    query_embedding, top_k=top_k, filters=filters if filters else None
                 )
 
             if not search_results:
@@ -309,32 +337,11 @@ class DocumentAnalysisCrew:
                     "processing_time_ms": int((time.time() - start) * 1000),
                 }
 
-            # Step 3: Rerank with cross-encoder for precision
-            search_results = self._rerank(query, search_results, top_k)
-
-            # Step 4: Build context from search results
-            context_parts = []
-            sources = []
-            for result in search_results:
-                page = result["metadata"].get("page_number", 0)
-                content_type = result["metadata"].get("content_type", "text")
-                image_index = result["metadata"].get("image_index", "")
-                label = f"[Page {page}, Type: {content_type}"
-                if image_index:
-                    label += f", Image #{image_index}"
-                label += "]"
-                context_parts.append(f"{label}\n{result['text']}")
-                sources.append({
-                    "document_id": result["metadata"].get("document_id", ""),
-                    "page": page,
-                    "section": result["metadata"].get("section_title", ""),
-                    "chunk_text": result["text"][:200],
-                    "relevance_score": result["relevance_score"],
-                })
-
+            # Step 3: Build context from search results
+            context_parts, sources = self._build_context_and_sources(search_results)
             context = "\n\n---\n\n".join(context_parts)
 
-            # Step 5: Generate answer using LLM
+            # Step 4: Generate answer using LLM
             llm_service = self.services["llm_provider"]
             from core.prompts import DOCUMENT_QA_PROMPT
 
@@ -365,7 +372,130 @@ class DocumentAnalysisCrew:
             logger.error("Query pipeline failed", extra={"error": str(e)})
             raise AgentOrchestrationError(f"Query failed: {e}")
 
+    # ─── Streaming Query Pipeline ─────────────────────────────
+
+    async def answer_query_stream(
+        self,
+        query: str,
+        document_id: Optional[str] = None,
+        top_k: int = 5,
+        chat_history: Optional[list[dict]] = None,
+        user_id: Optional[str] = None,
+    ) -> AsyncIterator[dict]:
+        """Streaming query pipeline — yields SSE-compatible events.
+
+        Events yielded:
+        - {"event": "token", "data": "..."}   — each LLM token
+        - {"event": "sources", "data": [...]}  — source citations
+        - {"event": "done", "data": ""}        — stream complete
+        """
+        logger.info(
+            "Starting streaming query pipeline",
+            extra={"query": query[:100], "document_id": document_id},
+        )
+
+        try:
+            embedding_svc = self.services["embedding_service"]
+            vector_db = self.services["vector_db"]
+            llm_service = self.services["llm_provider"]
+
+            # Step 1: Parse page numbers
+            target_pages = self._extract_page_numbers(query)
+            filters = {}
+            if document_id:
+                filters["document_id"] = document_id
+            if user_id:
+                filters["user_id"] = user_id
+
+            # Step 2: Search
+            query_embedding = embedding_svc.generate_query_embedding(query)
+
+            if target_pages:
+                page_results = []
+                for page_num in target_pages:
+                    page_filter = {**filters, "page_number": page_num}
+                    page_hits = vector_db.search(query_embedding, top_k=10, filters=page_filter)
+                    page_results.extend(page_hits)
+
+                broad_results = vector_db.search(query_embedding, top_k=top_k, filters=filters if filters else None)
+                seen_ids = {r["id"] for r in page_results}
+                for r in broad_results:
+                    if r["id"] not in seen_ids:
+                        page_results.append(r)
+                        seen_ids.add(r["id"])
+                search_results = page_results[:top_k]
+            else:
+                search_results = vector_db.search(
+                    query_embedding, top_k=top_k, filters=filters if filters else None
+                )
+
+            if not search_results:
+                yield {"event": "token", "data": "No relevant content found in the documents."}
+                yield {"event": "sources", "data": []}
+                yield {"event": "done", "data": ""}
+                return
+
+            # Step 3: Build context
+            context_parts, sources = self._build_context_and_sources(search_results)
+            context = "\n\n---\n\n".join(context_parts)
+
+            # Step 4: Build messages list with system prompt + chat history + current query
+            from core.prompts import DOCUMENT_QA_PROMPT
+
+            system_prompt = (
+                "You are an expert document analyst. Answer based ONLY on the provided context. "
+                "Cite sources using [Page X] format. If you cannot answer, say so. "
+                "Rate confidence at the end: HIGH / MEDIUM / LOW."
+            )
+
+            messages = [{"role": "system", "content": system_prompt}]
+
+            # Add chat history if provided
+            if chat_history:
+                for msg in chat_history:
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+
+            # Add current question with context
+            user_message = f"Context:\n{context}\n\nQuestion: {query}"
+            messages.append({"role": "user", "content": user_message})
+
+            # Step 5: Stream LLM response
+            async for token in llm_service.generate_stream(messages):
+                yield {"event": "token", "data": token}
+
+            # Step 6: Send sources and done
+            yield {"event": "sources", "data": sources}
+            yield {"event": "done", "data": ""}
+
+        except Exception as e:
+            logger.error("Streaming query failed", extra={"error": str(e)})
+            yield {"event": "error", "data": str(e)}
+
     # ─── Helper Methods ──────────────────────────────────────
+
+    def _build_context_and_sources(
+        self, search_results: list[dict]
+    ) -> tuple[list[str], list[dict]]:
+        """Build context parts and sources list from search results."""
+        context_parts = []
+        sources = []
+        for result in search_results:
+            page = result["metadata"].get("page_number", 0)
+            content_type = result["metadata"].get("content_type", "text")
+            image_index = result["metadata"].get("image_index", "")
+            label = f"[Page {page}, Type: {content_type}"
+            if image_index:
+                label += f", Image #{image_index}"
+            label += "]"
+            context_parts.append(f"{label}\n{result['text']}")
+            sources.append({
+                "document_id": result["metadata"].get("document_id", ""),
+                "page": page,
+                "section": result["metadata"].get("section_title", ""),
+                "chunk_text": result["text"][:200],
+                "relevance_score": result["relevance_score"],
+            })
+        return context_parts, sources
 
     def _describe_image(self, llm_service, image_bytes: bytes, page_num: int, image_index: int) -> str:
         """Send image to vision LLM and get a text description."""
@@ -384,34 +514,21 @@ class DocumentAnalysisCrew:
             return ""
 
     def _extract_page_numbers(self, query: str) -> list[int]:
-        """Extract page numbers mentioned in the query.
-
-        Handles patterns like:
-        - "page 123"
-        - "on page 45"
-        - "pages 10-15"
-        - "p. 7"
-        - "pg 42"
-        """
+        """Extract page numbers mentioned in the query."""
         pages = set()
 
-        # Match "page(s) X" or "p. X" or "pg X"
         for match in re.finditer(r'(?:pages?|pg\.?|p\.)\s*(\d+)', query, re.IGNORECASE):
             pages.add(int(match.group(1)))
 
-        # Match page ranges "pages 10-15" or "pages 10 to 15"
-        for match in re.finditer(r'(?:pages?)\s*(\d+)\s*[-–to]+\s*(\d+)', query, re.IGNORECASE):
+        for match in re.finditer(r'(?:pages?)\s*(\d+)\s*[-\u2013to]+\s*(\d+)', query, re.IGNORECASE):
             start, end = int(match.group(1)), int(match.group(2))
-            if end - start <= 20:  # Sanity limit
+            if end - start <= 20:
                 pages.update(range(start, end + 1))
 
         return sorted(pages)
 
     def _rerank(self, query: str, results: list[dict], top_k: int) -> list[dict]:
-        """Rerank search results using cross-encoder for better precision.
-
-        Falls back to original ordering if cross-encoder is not available.
-        """
+        """Rerank search results using cross-encoder (kept for optional use)."""
         if len(results) <= top_k:
             return results
 
@@ -422,7 +539,6 @@ class DocumentAnalysisCrew:
             pairs = [[query, r["text"]] for r in results]
             scores = reranker.predict(pairs)
 
-            # Attach scores and sort
             for i, score in enumerate(scores):
                 results[i]["rerank_score"] = float(score)
 

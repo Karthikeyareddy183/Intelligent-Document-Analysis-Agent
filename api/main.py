@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import get_settings
 from core.logger import setup_logger
-from api.routes import upload, query, documents, health
+from api.routes import upload, query, documents, health, conversations
 from api.dependencies import init_services
 from api.middleware import RequestLoggingMiddleware
 
@@ -47,7 +47,10 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # CORS middleware
+    # Custom middleware (added first → runs after CORS)
+    app.add_middleware(RequestLoggingMiddleware)
+
+    # CORS middleware (added last → outermost, handles OPTIONS preflight first)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=config.CORS_ORIGINS,
@@ -55,9 +58,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    # Custom middleware
-    app.add_middleware(RequestLoggingMiddleware)
 
     # Global exception handler for debugging
     @app.exception_handler(Exception)
@@ -73,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(upload.router, prefix="/api/v1", tags=["Upload"])
     app.include_router(query.router, prefix="/api/v1", tags=["Query"])
     app.include_router(documents.router, prefix="/api/v1", tags=["Documents"])
+    app.include_router(conversations.router, prefix="/api/v1", tags=["Conversations"])
     app.include_router(health.router, prefix="/api/v1", tags=["Health"])
 
     return app

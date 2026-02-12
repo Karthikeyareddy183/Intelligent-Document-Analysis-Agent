@@ -6,13 +6,8 @@ from services.document_service import DocumentService
 from services.embedding_service import EmbeddingService
 from services.vector_db_service import get_vector_db
 from services.llm_service import get_llm_provider
+from services.conversation_service import ConversationService
 from agents.orchestrator import DocumentAnalysisCrew
-from agents.tools.pdf_extractor import PDFExtractorTool
-from agents.tools.ocr_tool import OCRTool
-from agents.tools.opencv_detector import OpenCVTableDetectorTool
-from agents.tools.embedding_tool import EmbeddingIndexTool
-from agents.tools.vector_search_tool import VectorSearchTool
-from agents.tools.llm_analyzer_tool import LLMAnalyzerTool
 
 logger = setup_logger(__name__)
 
@@ -28,29 +23,23 @@ def init_services(config: Settings) -> dict:
     vector_db = get_vector_db(config)
     llm_provider = get_llm_provider(config)
 
-    # CrewAI tools
-    tools = {
-        "pdf_extractor": PDFExtractorTool(),
-        "ocr_tool": OCRTool(),
-        "opencv_detector": OpenCVTableDetectorTool(),
-        "embedding_tool": EmbeddingIndexTool(
-            embedding_service=embedding_service,
-            vector_db_service=vector_db,
-        ),
-        "vector_search": VectorSearchTool(
-            vector_db_service=vector_db,
-            embedding_service=embedding_service,
-        ),
-        "llm_analyzer": LLMAnalyzerTool(llm_service=llm_provider),
-    }
+    # Conversation service (optional — requires Supabase)
+    conversation_service = None
+    if config.SUPABASE_URL and config.SUPABASE_SERVICE_ROLE_KEY:
+        try:
+            conversation_service = ConversationService(config)
+            logger.info("ConversationService initialized")
+        except Exception as e:
+            logger.warning(f"ConversationService not available: {e}")
 
-    # Orchestrator
+    # Orchestrator (calls services directly — no CrewAI tools needed at runtime)
     services = {
         "document_service": document_service,
         "embedding_service": embedding_service,
         "vector_db": vector_db,
         "llm_provider": llm_provider,
-        "tools": tools,
+        "conversation_service": conversation_service,
+        "tools": {},  # Kept for backward compat with agent builder methods
     }
 
     orchestrator = DocumentAnalysisCrew(services=services, config=config)
@@ -58,7 +47,11 @@ def init_services(config: Settings) -> dict:
 
     logger.info(
         "All services initialized",
-        extra={"vector_db": config.VECTOR_DB_TYPE, "llm": config.LLM_PROVIDER},
+        extra={
+            "vector_db": config.VECTOR_DB_TYPE,
+            "llm": config.LLM_PROVIDER,
+            "embeddings": config.EMBEDDING_PROVIDER,
+        },
     )
 
     return services

@@ -1,4 +1,8 @@
-"""Document processing service — handles file I/O and content extraction."""
+"""Document processing service — handles file I/O and content extraction.
+
+Document metadata is persisted in the Supabase `documents` table.
+PDF/image extraction methods operate on local file paths (unchanged).
+"""
 
 import os
 import uuid
@@ -29,10 +33,28 @@ class DocumentService:
         self.ocr_language = config.OCR_LANGUAGE
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.processed_dir.mkdir(parents=True, exist_ok=True)
-        self._documents: dict[str, dict] = {}
 
-    def save_upload(self, file_content: bytes, filename: str) -> tuple[str, str]:
-        """Save uploaded file and return (document_id, file_path)."""
+        # Initialize Supabase client for document metadata persistence
+        self._supabase = None
+        if config.SUPABASE_URL and config.SUPABASE_SERVICE_ROLE_KEY:
+            try:
+                from supabase import create_client
+                self._supabase = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY)
+                logger.info("DocumentService connected to Supabase")
+            except Exception as e:
+                logger.warning(f"Supabase not available for document metadata: {e}")
+
+    # ─── CRUD Operations (Supabase-backed) ────────────────────
+
+    def save_upload(
+        self,
+        file_content: bytes,
+        filename: str,
+        user_id: Optional[str] = None,
+        file_type: Optional[str] = None,
+        file_size: Optional[int] = None,
+    ) -> tuple[str, str]:
+        """Save uploaded file and persist metadata to Supabase. Returns (document_id, file_path)."""
         document_id = str(uuid.uuid4())
         safe_name = f"{document_id}_{filename}"
         file_path = str(self.upload_dir / safe_name)
@@ -40,30 +62,141 @@ class DocumentService:
         with open(file_path, "wb") as f:
             f.write(file_content)
 
-        self._documents[document_id] = {
-            "document_id": document_id,
-            "filename": filename,
-            "file_path": file_path,
-            "status": DocumentStatus.PROCESSING,
-            "pages": 0,
-            "chunks_created": 0,
-        }
+        if self._supabase and user_id:
+            try:
+                self._supabase.table("documents").insert({
+                    "user_id": user_id,
+                    "document_id": document_id,
+                    "filename": filename,
+                    "file_type": file_type,
+                    "file_size": file_size or len(file_content),
+                    "storage_path": file_path,
+                    "status": "processing",
+                }).execute()
+            except Exception as e:
+                logger.error(f"Failed to insert document metadata: {e}")
+                raise DocumentProcessingError(f"Failed to save document metadata: {e}")
+        else:
+            logger.warning("No Supabase client or user_id — metadata not persisted")
 
         logger.info("File saved", extra={"document_id": document_id, "file_name": filename})
         return document_id, file_path
 
     def get_document_info(self, document_id: str) -> Optional[dict]:
-        return self._documents.get(document_id)
+        """Fetch document metadata from Supabase."""
+        if not self._supabase:
+            return None
+
+        try:
+            result = self._supabase.table("documents").select("*").eq(
+                "document_id", document_id
+            ).limit(1).execute()
+
+            if result.data:
+                row = result.data[0]
+                return {
+                    "document_id": row["document_id"],
+                    "user_id": row.get("user_id"),
+                    "filename": row["filename"],
+                    "file_type": row.get("file_type"),
+                    "file_size": row.get("file_size"),
+                    "storage_path": row.get("storage_path"),
+                    "status": row.get("status", "processing"),
+                    "pages": row.get("pages", 0),
+                    "chunks_created": row.get("chunks_created", 0),
+                    "error": row.get("error"),
+                    "created_at": row.get("created_at"),
+                    "updated_at": row.get("updated_at"),
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Failed to fetch document info: {e}")
+            return None
 
     def update_document_status(
-        self, document_id: str, status: DocumentStatus, **kwargs
+        self, document_id: str, status, **kwargs
     ):
-        if document_id in self._documents:
-            self._documents[document_id]["status"] = status
-            self._documents[document_id].update(kwargs)
+        """Update document status and metadata in Supabase."""
+        if not self._supabase:
+            return
 
-    def list_documents(self) -> list[dict]:
-        return list(self._documents.values())
+        # Convert DocumentStatus enum to string if needed
+        status_str = status.value if hasattr(status, "value") else str(status)
+
+        update_data = {"status": status_str}
+        for key in ("pages", "chunks_created", "error"):
+            if key in kwargs:
+                update_data[key] = kwargs[key]
+
+        try:
+            self._supabase.table("documents").update(update_data).eq(
+                "document_id", document_id
+            ).execute()
+        except Exception as e:
+            logger.error(f"Failed to update document status: {e}")
+
+    def list_documents(self, user_id: Optional[str] = None) -> list[dict]:
+        """List documents, optionally filtered by user_id."""
+        if not self._supabase:
+            return []
+
+        try:
+            query = self._supabase.table("documents").select("*").order(
+                "created_at", desc=True
+            )
+            if user_id:
+                query = query.eq("user_id", user_id)
+
+            result = query.execute()
+
+            return [
+                {
+                    "document_id": row["document_id"],
+                    "user_id": row.get("user_id"),
+                    "filename": row["filename"],
+                    "file_type": row.get("file_type"),
+                    "file_size": row.get("file_size"),
+                    "status": row.get("status", "processing"),
+                    "pages": row.get("pages", 0),
+                    "chunks_created": row.get("chunks_created", 0),
+                    "error": row.get("error"),
+                    "created_at": row.get("created_at"),
+                    "updated_at": row.get("updated_at"),
+                }
+                for row in result.data
+            ]
+        except Exception as e:
+            logger.error(f"Failed to list documents: {e}")
+            return []
+
+    def delete_document(self, document_id: str) -> bool:
+        """Delete document metadata and local file. Returns True on success."""
+        if not self._supabase:
+            return False
+
+        try:
+            # Get storage path before deleting
+            doc = self.get_document_info(document_id)
+            if not doc:
+                return False
+
+            # Delete from documents table (conversations cascade via document_id FK)
+            self._supabase.table("documents").delete().eq(
+                "document_id", document_id
+            ).execute()
+
+            # Delete local file if it exists
+            storage_path = doc.get("storage_path")
+            if storage_path and os.path.exists(storage_path):
+                os.remove(storage_path)
+
+            logger.info("Document deleted", extra={"document_id": document_id})
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete document: {e}")
+            return False
+
+    # ─── Content Extraction (unchanged) ───────────────────────
 
     def extract_pdf_content(self, file_path: str) -> list[dict]:
         """Extract text, tables, and images from a PDF file."""

@@ -2,8 +2,9 @@
 
 import time
 import threading
-from fastapi import APIRouter, UploadFile, File, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Depends
 
+from api.auth import get_current_user
 from api.schemas.responses import UploadResponse, ErrorResponse
 from core.constants import ALLOWED_CONTENT_TYPES
 from core.logger import setup_logger
@@ -13,13 +14,14 @@ logger = setup_logger(__name__)
 router = APIRouter()
 
 
-def _process_in_thread(orchestrator, file_path: str, document_id: str, filename: str):
+def _process_in_thread(orchestrator, file_path: str, document_id: str, filename: str, user_id: str = None):
     """Run document processing in a separate thread so it doesn't block the event loop."""
     try:
         orchestrator.process_document(
             file_path=file_path,
             document_id=document_id,
             filename=filename,
+            user_id=user_id,
         )
     except Exception as e:
         logger.error("Background processing failed", extra={"document_id": document_id, "error": str(e)})
@@ -34,8 +36,8 @@ def _process_in_thread(orchestrator, file_path: str, document_id: str, filename:
 )
 async def upload_document(
     request: Request,
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="PDF, JPG, PNG, or WEBP file"),
+    user_id: str = Depends(get_current_user),
 ):
     services = request.app.state.services
     config = request.app.state.config
@@ -62,15 +64,21 @@ async def upload_document(
     if len(contents) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    # Save file
+    # Save file with user_id
     doc_service = services["document_service"]
-    document_id, file_path = doc_service.save_upload(contents, file.filename)
+    document_id, file_path = doc_service.save_upload(
+        contents,
+        file.filename,
+        user_id=user_id,
+        file_type=file.content_type,
+        file_size=len(contents),
+    )
 
-    # Process document in a separate thread (not BackgroundTasks which blocks the event loop)
+    # Process document in a separate thread
     orchestrator = services["orchestrator"]
     thread = threading.Thread(
         target=_process_in_thread,
-        args=(orchestrator, file_path, document_id, file.filename),
+        args=(orchestrator, file_path, document_id, file.filename, user_id),
         daemon=True,
     )
     thread.start()

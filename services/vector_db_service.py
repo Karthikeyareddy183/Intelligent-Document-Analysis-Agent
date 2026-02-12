@@ -275,7 +275,7 @@ class SupabaseVectorService(VectorDBInterface):
         try:
             rows = []
             for doc in documents:
-                rows.append({
+                row = {
                     "content": doc["text"],
                     "document_id": doc["document_id"],
                     "file_name": doc.get("filename", ""),
@@ -285,11 +285,16 @@ class SupabaseVectorService(VectorDBInterface):
                     "content_type": doc.get("content_type", "text"),
                     "char_count": len(doc["text"]),
                     "embedding": doc["embedding"],
-                })
+                }
+                if doc.get("user_id"):
+                    row["user_id"] = doc["user_id"]
+                rows.append(row)
 
-            # Batch insert in groups of 500
-            for i in range(0, len(rows), 500):
-                batch = rows[i : i + 500]
+            # Batch insert in groups of 50 to avoid payload size limits
+            # (each row with 1536-dim vector is ~12KB, so 50 rows ≈ 600KB per request)
+            batch_size = 50
+            for i in range(0, len(rows), batch_size):
+                batch = rows[i : i + batch_size]
                 self.client.table(self.table_name).insert(batch).execute()
 
             logger.info("Documents added to Supabase", extra={"count": len(documents)})
@@ -318,6 +323,8 @@ class SupabaseVectorService(VectorDBInterface):
                     rpc_params["filter_document_id"] = filters["document_id"]
                 if "page_number" in filters:
                     rpc_params["filter_page_number"] = filters["page_number"]
+                if "user_id" in filters:
+                    rpc_params["filter_user_id"] = filters["user_id"]
 
             response = self.client.rpc("match_documents", rpc_params).execute()
 
@@ -383,6 +390,8 @@ class SupabaseVectorService(VectorDBInterface):
                     rpc_params["filter_document_id"] = filters["document_id"]
                 if "page_number" in filters:
                     rpc_params["filter_page_number"] = filters["page_number"]
+                if "user_id" in filters:
+                    rpc_params["filter_user_id"] = filters["user_id"]
 
             response = self.client.rpc("hybrid_search", rpc_params).execute()
 
